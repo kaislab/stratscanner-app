@@ -23,14 +23,14 @@ def load_universe():
         df.columns = [col.strip() for col in df.columns]
         ticker_col = next(col for col in df.columns if col.lower() == 'ticker')
         df = df.rename(columns={ticker_col: 'Ticker'})
-        # Optionally include Sector if present
+        # Include Sector
         if any(col.strip().lower() == 'sector' for col in df.columns):
             sector_col = next(col for col in df.columns if col.lower() == 'sector')
             df = df.rename(columns={sector_col: 'Sector'})
             df['Sector'] = df['Sector'].fillna('Unknown')
         else:
             df['Sector'] = 'Unknown'  # Default value if Sector is missing
-        # Optionally include Industry if present
+        # Optionally include Industry
         industry_col = next((col for col in df.columns if col.strip().lower() == 'industry'), None)
         if industry_col:
             df = df.rename(columns={industry_col: 'Industry'})
@@ -124,7 +124,7 @@ def get_pattern_with_color(pattern, color):
         return "N/A"
     return f"{pattern}-{color}"
 
-def compute_strat_table(data_dict, end_date, timeframe, interval):
+def compute_strat_table(data_dict, end_date, timeframe, interval, universe_df):
     rows = []
     all_timeframes = ["Daily", "Weekly", "Monthly", "Quarterly", "Yearly"]
     for ticker, df in data_dict.items():
@@ -147,28 +147,25 @@ def compute_strat_table(data_dict, end_date, timeframe, interval):
             c2 = get_pattern_with_color(patterns[-3], colors[-3]) if len(patterns) >= 3 else "N/A"
             c3 = get_pattern_with_color(patterns[-4], colors[-4]) if len(patterns) >= 4 else "N/A"
 
-            # Compute colors for all timeframes
+            # Compute colors for all timeframes using the latest data
             row = {"Ticker": ticker, "CC": cc, "C1": c1, "C2": c2, "C3": c3}
-            now = datetime.datetime.now()
-            is_trading_hours = (now.hour >= 14 and now.hour < 21) and now.weekday() < 5  # Approx NYSE hours in CEST
             for tf in all_timeframes:
                 df_tf = resample_ohlc(df, tf, interval)
-                if tf in ["Weekly", "Monthly"] and not is_trading_hours:
-                    if tf == "Weekly":
-                        df_tf = df_tf[df_tf.index <= end_date - pd.offsets.Week(weekday=4)]  # Last Friday
-                    else:  # Monthly
-                        df_tf = df_tf[df_tf.index <= end_date - pd.offsets.MonthEnd()]
-                    df_tf = df_tf.iloc[-1:]
+                if not df_tf.empty:
+                    latest_data = df_tf.tail(1)
+                    if not latest_data.empty and not pd.isna(latest_data["Open"].iloc[0]) and not pd.isna(latest_data["Close"].iloc[0]):
+                        row[f"{tf[0]}_Color"] = "🟩" if latest_data["Close"].iloc[0] > latest_data["Open"].iloc[0] else "🟥"
+                    else:
+                        row[f"{tf[0]}_Color"] = "N/A"
                 else:
-                    df_tf = df_tf.tail(1)
-                if df_tf.empty or pd.isna(df_tf["Open"].iloc[0]) or pd.isna(df_tf["Close"].iloc[0]):
                     row[f"{tf[0]}_Color"] = "N/A"
-                else:
-                    row[f"{tf[0]}_Color"] = "🟩" if df_tf["Close"].iloc[0] > df_tf["Open"].iloc[0] else "🟥"
+            # Merge Sector from universe_df
+            sector_row = universe_df[universe_df["Ticker"] == ticker].iloc[0] if ticker in universe_df["Ticker"].values else pd.Series({"Sector": "Unknown"})
+            row["Sector"] = sector_row["Sector"]
             rows.append(row)
         except Exception:
             # Ensure 'Ticker' is included even on error
-            row = {"Ticker": ticker, "CC": "N/A", "C1": "N/A", "C2": "N/A", "C3": "N/A"}
+            row = {"Ticker": ticker, "CC": "N/A", "C1": "N/A", "C2": "N/A", "C3": "N/A", "Sector": "Unknown"}
             for tf in all_timeframes:
                 row[f"{tf[0]}_Color"] = "N/A"
             rows.append(row)
@@ -324,7 +321,7 @@ if "data_dict" in st.session_state:
         st.session_state["strat_tables"] = {}
     for tf in timeframes:
         if tf not in st.session_state["strat_tables"]:
-            st.session_state["strat_tables"][tf] = compute_strat_table(st.session_state["data_dict"], st.session_state["end_date_dt"], tf, st.session_state["interval"])
+            st.session_state["strat_tables"][tf] = compute_strat_table(st.session_state["data_dict"], st.session_state["end_date_dt"], tf, st.session_state["interval"], universe_df)
 
     # Process ticker search
     search_tickers = [t.strip().upper() for t in ticker_search.split() if t.strip()] if ticker_search else []
@@ -340,8 +337,9 @@ if "data_dict" in st.session_state:
             if search_tickers:
                 df_strat = df_strat[df_strat["Ticker"].isin(search_tickers)]
             
-            # Create filter row above the table
-            col1, col2, col3, col4, col5, col6, col7, col8, col9, col10 = st.columns(10)
+            # Create two rows of filters
+            # Row 1: Pattern filters (CC, C1, C2, C3)
+            col1, col2, col3, col4, col5 = st.columns(5)
             filters = {}
             with col1:
                 filters["Ticker"] = st.multiselect("Ticker", options=df_strat["Ticker"].dropna().unique().tolist(), default=st.session_state[f"{tf}_filters"]["Ticker"], key=f"{tf}_Ticker")
@@ -353,6 +351,9 @@ if "data_dict" in st.session_state:
                 filters["C2"] = st.multiselect("C2", options=df_strat["C2"].dropna().unique().tolist(), default=st.session_state[f"{tf}_filters"]["C2"], key=f"{tf}_C2")
             with col5:
                 filters["C3"] = st.multiselect("C3", options=df_strat["C3"].dropna().unique().tolist(), default=st.session_state[f"{tf}_filters"]["C3"], key=f"{tf}_C3")
+            
+            # Row 2: Color filters (D_Color, W_Color, M_Color, Q_Color, Y_Color)
+            col6, col7, col8, col9, col10 = st.columns(5)
             with col6:
                 filters["D_Color"] = st.multiselect("D", options=df_strat["D_Color"].dropna().unique().tolist(), default=st.session_state[f"{tf}_filters"]["D_Color"], key=f"{tf}_D_Color")
             with col7:
@@ -369,6 +370,8 @@ if "data_dict" in st.session_state:
             for col, selected in filters.items():
                 if selected:
                     filtered_df = filtered_df[filtered_df[col].isin(selected)]
+            # Add Sector column to the right of Ticker
+            filtered_df = filtered_df[['Ticker', 'Sector', 'CC', 'C1', 'C2', 'C3', 'D_Color', 'W_Color', 'M_Color', 'Q_Color', 'Y_Color']]
             st.dataframe(filtered_df, use_container_width=True)
 
     # Sectors tab
@@ -385,16 +388,16 @@ if "data_dict" in st.session_state:
             cols = st.columns([2, 1, 1, 1, 1, 1])  # Sector, Holdings, 2u %, 2d %, 2u Bar, 2d Bar
             cols[0].write(row['Sector'])
             cols[1].write(row['Holdings'])
-            # 2u Section
+            # 2u Progress Bar with percentage on top
             cols[2].write("2u Candle Trend")
             cols[2].markdown(
-                f"<div style='position: relative;'><span style='position: absolute; top: -20px; left: 50%; transform: translateX(-50%); font-size: 12px;'>{row['2u Green %']:.1f}%</span><div style='background: linear-gradient(to right, #32CD32 {row['2u Green %']}%, #FF4500 {row['2u Green %']}%); height: 15px; width: 100%;'></div></div>",
+                f"<div style='position: relative;'><span style='position: absolute; top: -15px; left: 50%; transform: translateX(-50%); font-size: 12px;'>{row['2u Green %']:.1f}%</span><div style='background: linear-gradient(to right, #32CD32 {row['2u Green %']}%, #FF4500 {row['2u Green %']}%); height: 15px; width: 100%;'></div></div>",
                 unsafe_allow_html=True
             )
-            # 2d Section
+            # 2d Progress Bar with percentage on top
             cols[3].write("2d Candle Trend")
             cols[3].markdown(
-                f"<div style='position: relative;'><span style='position: absolute; top: -20px; left: 50%; transform: translateX(-50%); font-size: 12px;'>{row['2d Green %']:.1f}%</span><div style='background: linear-gradient(to right, #32CD32 {row['2d Green %']}%, #FF4500 {row['2d Green %']}%); height: 15px; width: 100%;'></div></div>",
+                f"<div style='position: relative;'><span style='position: absolute; top: -15px; left: 50%; transform: translateX(-50%); font-size: 12px;'>{row['2d Green %']:.1f}%</span><div style='background: linear-gradient(to right, #32CD32 {row['2d Green %']}%, #FF4500 {row['2d Green %']}%); height: 15px; width: 100%;'></div></div>",
                 unsafe_allow_html=True
             )
             cols[4].empty()  # Placeholder to maintain column structure
